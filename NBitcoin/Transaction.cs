@@ -6,8 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace NBitcoin
 {
@@ -225,6 +223,16 @@ namespace NBitcoin
 			{
 				scriptSig = value;
 			}
+		}
+
+
+		/// <summary>
+		/// Try to get the expected scriptPubKey of this TxIn based on its scriptSig and witScript.
+		/// </summary>
+		/// <returns>Null if could not infer the scriptPubKey, else, the expected scriptPubKey</returns>
+		public IDestination GetSigner()
+		{
+			return scriptSig.GetSigner() ?? witScript.GetSigner();
 		}
 
 		WitScript witScript = WitScript.Empty;
@@ -1055,6 +1063,17 @@ namespace NBitcoin
 		{
 			return new WitScript(ToBytes());
 		}
+
+		public TxDestination GetSigner()
+		{
+			var pubKey = PayToWitPubKeyHashTemplate.Instance.ExtractWitScriptParameters(this);
+			if(pubKey != null)
+			{
+				return pubKey.PublicKey.WitHash;
+			}
+			var p2sh = PayToWitScriptHashTemplate.Instance.ExtractWitScriptParameters(this);
+			return p2sh != null ? p2sh.WitHash : null;
+		}
 	}
 
 	[Flags]
@@ -1197,7 +1216,7 @@ namespace NBitcoin
 				stream.ReadWrite<TxInList, TxIn>(ref vin);
 
 				var hasNoDummy = (nVersion & NoDummyInput) != 0 && vin.Count == 0;
-				if(hasNoDummy)
+				if(witSupported && hasNoDummy)
 					nVersion = nVersion & ~NoDummyInput;
 
 				if(vin.Count == 0 && witSupported && !hasNoDummy)
@@ -1240,7 +1259,7 @@ namespace NBitcoin
 			}
 			else
 			{
-				var version = vin.Count == 0 && vout.Count > 0 ? nVersion | NoDummyInput : nVersion;
+				var version = (witSupported && (vin.Count == 0 && vout.Count > 0)) ? nVersion | NoDummyInput : nVersion;
 				stream.ReadWrite(ref version);
 
 				if(witSupported)
@@ -1275,19 +1294,28 @@ namespace NBitcoin
 
 		public uint256 GetHash()
 		{
-			if(_Hashes != null && _Hashes[0] != null)
+			uint256 h = null;
+			var hashes = _Hashes;
+			if(hashes != null)
 			{
-				return _Hashes[0];
+				h = hashes[0];
 			}
-			MemoryStream ms = new MemoryStream();
-			this.ReadWrite(new BitcoinStream(ms, true)
+			if(h != null)
+				return h;
+
+			using(HashStream hs = new HashStream())
 			{
-				TransactionOptions = TransactionOptions.None
-			});
-			var h = Hashes.Hash256(ms.ToArrayEfficient());
-			if(_Hashes != null)
+				this.ReadWrite(new BitcoinStream(hs, true)
+				{
+					TransactionOptions = TransactionOptions.None
+				});
+				h = hs.GetHash();
+			}
+
+			hashes = _Hashes;
+			if(hashes != null)
 			{
-				_Hashes[0] = h;
+				hashes[0] = h;
 			}
 			return h;
 		}
@@ -1314,19 +1342,29 @@ namespace NBitcoin
 		{
 			if(!HasWitness)
 				return GetHash();
-			if(_Hashes != null && _Hashes[1] != null)
+
+			uint256 h = null;
+			var hashes = _Hashes;
+			if(hashes != null)
 			{
-				return _Hashes[1];
+				h = hashes[1];
 			}
-			MemoryStream ms = new MemoryStream();
-			this.ReadWrite(new BitcoinStream(ms, true)
+			if(h != null)
+				return h;
+
+			using(HashStream hs = new HashStream())
 			{
-				TransactionOptions = TransactionOptions.Witness
-			});
-			var h = Hashes.Hash256(ms.ToArrayEfficient());
-			if(_Hashes != null)
+				this.ReadWrite(new BitcoinStream(hs, true)
+				{
+					TransactionOptions = TransactionOptions.Witness
+				});
+				h = hs.GetHash();
+			}
+
+			hashes = _Hashes;
+			if(hashes != null)
 			{
-				_Hashes[1] = h;
+				hashes[1] = h;
 			}
 			return h;
 		}
@@ -1417,7 +1455,7 @@ namespace NBitcoin
 		/// </summary>
 		/// <param name="secrets">Secrets</param>
 		/// <param name="coins">Coins to sign</param>
-		public void Sign(ISecret[] secrets, params ICoin[] coins)
+		public void Sign(ISecret[] secrets, ICoin[] coins)
 		{
 			Sign(secrets.Select(s => s.PrivateKey).ToArray(), coins);
 		}
@@ -1425,21 +1463,22 @@ namespace NBitcoin
 		/// <summary>
 		/// Sign a specific coin with the given secret
 		/// </summary>
-		/// <param name="key">Private keys</param>
+		/// <param name="keys">Private keys</param>
 		/// <param name="coins">Coins to sign</param>
-		public void Sign(Key[] keys, params ICoin[] coins)
+		public void Sign(Key[] keys, ICoin[] coins)
 		{
 			TransactionBuilder builder = new TransactionBuilder();
 			builder.AddKeys(keys);
 			builder.AddCoins(coins);
 			builder.SignTransactionInPlace(this);
 		}
+
 		/// <summary>
 		/// Sign a specific coin with the given secret
 		/// </summary>
 		/// <param name="secret">Secret</param>
 		/// <param name="coins">Coins to sign</param>
-		public void Sign(ISecret secret, params ICoin[] coins)
+		public void Sign(ISecret secret, ICoin[] coins)
 		{
 			Sign(new[] { secret }, coins);
 		}
@@ -1447,11 +1486,51 @@ namespace NBitcoin
 		/// <summary>
 		/// Sign a specific coin with the given secret
 		/// </summary>
+		/// <param name="secrets">Secrets</param>
+		/// <param name="coins">Coins to sign</param>
+		public void Sign(ISecret[] secrets, ICoin coin)
+		{
+			Sign(secrets, new[] { coin });
+		}
+
+		/// <summary>
+		/// Sign a specific coin with the given secret
+		/// </summary>
+		/// <param name="secret">Secret</param>
+		/// <param name="coin">Coins to sign</param>
+		public void Sign(ISecret secret, ICoin coin)
+		{
+			Sign(new[] { secret }, new[] { coin });
+		}
+
+		/// <summary>
+		/// Sign a specific coin with the given secret
+		/// </summary>
 		/// <param name="key">Private key</param>
 		/// <param name="coins">Coins to sign</param>
-		public void Sign(Key key, params ICoin[] coins)
+		public void Sign(Key key, ICoin[] coins)
 		{
 			Sign(new[] { key }, coins);
+		}
+
+		/// <summary>
+		/// Sign a specific coin with the given secret
+		/// </summary>
+		/// <param name="key">Private key</param>
+		/// <param name="coin">Coin to sign</param>
+		public void Sign(Key key, ICoin coin)
+		{
+			Sign(new[] { key }, new[] { coin });
+		}
+
+		/// <summary>
+		/// Sign a specific coin with the given secret
+		/// </summary>
+		/// <param name="keys">Private keys</param>
+		/// <param name="coin">Coin to sign</param>
+		public void Sign(Key[] keys, ICoin coin)
+		{
+			Sign(keys, new[] { coin });
 		}
 
 		/// <summary>
@@ -1460,6 +1539,7 @@ namespace NBitcoin
 		/// <para>For more complex scenario, use TransactionBuilder</para>
 		/// </summary>
 		/// <param name="secret"></param>
+		[Obsolete("Use Sign(ISecret,ICoin[]) instead)")]
 		public void Sign(ISecret secret, bool assumeP2SH)
 		{
 			Sign(secret.PrivateKey, assumeP2SH);
@@ -1471,6 +1551,7 @@ namespace NBitcoin
 		/// <para>For more complex scenario, use TransactionBuilder</para>
 		/// </summary>
 		/// <param name="secret"></param>
+		[Obsolete("Use Sign(Key,ICoin[]) instead)")]
 		public void Sign(Key key, bool assumeP2SH)
 		{
 			List<Coin> coins = new List<Coin>();
@@ -1514,11 +1595,12 @@ namespace NBitcoin
 			return new TxPayload(this.Clone());
 		}
 
-
+#if !NOJSONNET
 		public static Transaction Parse(string tx, RawFormat format, Network network = null)
 		{
 			return GetFormatter(format, network).ParseJson(tx);
 		}
+#endif
 
 		public static Transaction Parse(string hex)
 		{
@@ -1529,7 +1611,7 @@ namespace NBitcoin
 		{
 			return Encoders.Hex.EncodeData(this.ToBytes());
 		}
-
+#if !NOJSONNET
 		public override string ToString()
 		{
 			return ToString(RawFormat.BlockExplorer);
@@ -1565,7 +1647,7 @@ namespace NBitcoin
 				throw new ArgumentNullException("formatter");
 			return formatter.ToString(this);
 		}
-
+#endif
 		/// <summary>
 		/// Calculate the fee of the transaction
 		/// </summary>
@@ -1598,7 +1680,7 @@ namespace NBitcoin
 			var fee = GetFee(spentCoins);
 			if(fee == null)
 				return null;
-			return new FeeRate(fee, this.GetSerializedSize());
+			return new FeeRate(fee, this.GetVirtualSize());
 		}
 
 		public bool IsFinal(ChainedBlock block)
@@ -1739,6 +1821,10 @@ namespace NBitcoin
 		/// <returns>A new transaction with only the options wanted</returns>
 		public Transaction WithOptions(TransactionOptions options)
 		{
+			if(options == TransactionOptions.Witness && HasWitness)
+				return this;
+			if(options == TransactionOptions.None && !HasWitness)
+				return this;
 			var instance = new Transaction();
 			var ms = new MemoryStream();
 			var bms = new BitcoinStream(ms, true);

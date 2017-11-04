@@ -20,10 +20,11 @@ namespace NBitcoin.Tests
 	public class NodeServerTester : IDisposable
 	{
 		static Random _Rand = new Random();
-		public NodeServerTester(Network network = null)
+		public NodeServerTester()
 		{
 			int retry = 0;
-			network = network ?? Network.TestNet;
+			var network = Network.RegTest;
+			Network = network;
 			while(true)
 			{
 				try
@@ -53,6 +54,11 @@ namespace NBitcoin.Tests
 						throw;
 				}
 			}
+		}
+
+		public Network Network
+		{
+			get; set;
 		}
 
 		public IEnumerable<Node> ConnectedNodes
@@ -212,6 +218,7 @@ namespace NBitcoin.Tests
 				Assert.True(seed.State == NodeState.HandShaked);
 				seed.Disconnect();
 				Assert.True(seed.State == NodeState.Offline);
+				Assert.NotNull(seed.TimeOffset);
 			}
 		}
 
@@ -284,6 +291,35 @@ namespace NBitcoin.Tests
 
 		[Fact]
 		[Trait("Protocol", "Protocol")]
+		public void MaxConnectionLimit()
+		{
+			using (var tester = new NodeServerTester())
+			{
+				tester.Server1.MaxConnections = 4;
+				Node.Connect(tester.Network, tester.Server1.ExternalEndpoint).VersionHandshake();
+				Node.Connect(tester.Network, tester.Server1.ExternalEndpoint).VersionHandshake();
+				Node.Connect(tester.Network, tester.Server1.ExternalEndpoint).VersionHandshake();
+				Node.Connect(tester.Network, tester.Server1.ExternalEndpoint).VersionHandshake();
+
+				TestUtils.Eventually(() => tester.Server1.ConnectedNodes.Count == 4);
+
+				var connect = Node.Connect(tester.Network, tester.Server1.ExternalEndpoint);
+				try
+				{
+					connect.VersionHandshake();
+				}
+				catch
+				{
+				}
+
+				TestUtils.Eventually(() => tester.Server1.ConnectedNodes.Count == 4);
+				TestUtils.Eventually(() => connect.IsConnected == false);
+			}
+		}
+
+
+		[Fact]
+		[Trait("Protocol", "Protocol")]
 		public void CanMaintainChainWithChainBehavior()
 		{
 			using(var builder = NodeBuilder.Create())
@@ -293,7 +329,7 @@ namespace NBitcoin.Tests
 				var rpc = builder.Nodes[0].CreateRPCClient();
 				var chain = node.GetChain(rpc.GetBlockHash(500));
 				Assert.True(chain.Height == 500);
-				using(var tester = new NodeServerTester(Network.RegTest))
+				using(var tester = new NodeServerTester())
 				{
 					var n1 = tester.Node1;
 					n1.Behaviors.Add(new ChainBehavior(chain));
@@ -313,7 +349,11 @@ namespace NBitcoin.Tests
 					Assert.True(chain1.Height == 500);
 					chain1 = n1.GetChain(rpc.GetBlockHash(499));
 					Assert.True(chain1.Height == 499);
-					Thread.Sleep(5000);
+
+					//Should not broadcast above HighestValidatorPoW
+					n1.Behaviors.Find<ChainBehavior>().SharedState.HighestValidatedPoW = chain1.GetBlock(300);
+					chain1 = n2.GetChain(rpc.GetBlockHash(499));
+					Assert.True(chain1.Height == 300);
 				}
 			}
 		}
@@ -366,7 +406,10 @@ namespace NBitcoin.Tests
 			Stopwatch watch = new Stopwatch();
 			NodeConnectionParameters parameters = new NodeConnectionParameters();
 			var addrman = GetCachedAddrMan("addrmancache.dat");
-			parameters.TemplateBehaviors.Add(new AddressManagerBehavior(addrman));
+			parameters.TemplateBehaviors.Add(new AddressManagerBehavior(addrman)
+			{
+				PeersToDiscover = 50
+			});
 			watch.Start();
 			using(var node = Node.Connect(Network.Main, parameters))
 			{
@@ -428,6 +471,29 @@ namespace NBitcoin.Tests
 				var client = node.CreateNodeClient();
 				var txIds = client.GetMempool();
 				Assert.True(txIds.Length == 2);
+			}
+		}
+
+		[Fact]
+		[Trait("Protocol", "Protocol")]
+		public void SynchronizeChainSurviveReorg()
+		{
+			using(var builder = NodeBuilder.Create())
+			{
+				ConcurrentChain chain = new ConcurrentChain(Network.RegTest);
+				var node1 = builder.CreateNode(true);
+				node1.CreateRPCClient().Generate(10);
+				node1.CreateNodeClient().SynchronizeChain(chain);
+				Assert.Equal(10, chain.Height);
+
+
+				var node2 = builder.CreateNode(true);
+				node2.CreateRPCClient().Generate(12);
+
+				var node2c = node2.CreateNodeClient();
+				node2c.PollHeaderDelay = TimeSpan.FromSeconds(2);
+				node2c.SynchronizeChain(chain);
+				Assert.Equal(12, chain.Height);
 			}
 		}
 
@@ -510,6 +576,7 @@ namespace NBitcoin.Tests
 				Assert.Equal(NodeState.HandShaked, toS2.State);
 				Thread.Sleep(100); //Let the time to Server2 to add the new node, else the test was failing sometimes.
 				Assert.Equal(NodeState.HandShaked, tester.Node2.State);
+				Assert.NotNull(toS2.TimeOffset);
 			}
 		}
 

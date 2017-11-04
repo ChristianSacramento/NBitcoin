@@ -1,11 +1,15 @@
-#NBitcoin
+# NBitcoin
 
 [![Join the chat at https://gitter.im/MetacoSA/NBitcoin](https://badges.gitter.im/MetacoSA/NBitcoin.svg)](https://gitter.im/MetacoSA/NBitcoin?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+[![Build status](https://ci.appveyor.com/api/projects/status/6xq0yg942jatra0x?svg=true)](https://ci.appveyor.com/project/NicolasDorier/nbitcoin)
+<img src="http://segwit.co/static/public/images/logo.png" width="100"> [![NuGet](https://img.shields.io/nuget/v/NBitcoin.svg)](https://www.nuget.org/packages/NBitcoin)
 
-NBitcoin is the most complete Bitcoin library for the .NET platform. It is compatible with Open Assets and implements most relevant Bitcoin Improvement Proposals (BIPs). It provides also low level access to Bitcoin primitives so you can easily create your own smart contracts. Join us on our [gitter chat room](https://gitter.im/MetacoSA/NBitcoin).
+NBitcoin is the most complete Bitcoin library for the .NET platform. It implements all most relevant Bitcoin Improvement Proposals (BIPs). It provides also low level access to Bitcoin primitives so you can easily build your application on top of it. Join us on our [gitter chat room](https://gitter.im/MetacoSA/NBitcoin).
+It works on Windows, Mac and Linux with Xamarin, Unity, .NET Core or CLR. (Porting to Unity should not be that hard if you need it)
 
+The best documentation available is our [eBook](https://programmingblockchain.gitbooks.io/programmingblockchain/content/), and the excellent unit tests. There is also some more resources below.
 
-#How to use ?
+# How to use ?
 With nuget :
 >**Install-Package NBitcoin** 
 
@@ -19,7 +23,65 @@ The packages supports:
 To compile it by yourself, you can git clone, open the project and hit the compile button on visual studio.
 How to get started ? Check out this article [on CodeProject](http://www.codeproject.com/Articles/768412/NBitcoin-The-most-complete-Bitcoin-port-Part-Crypt) for some basic Bitcoin operations, or [this Introduction to NBitcoin video](https://www.youtube.com/watch?v=X4ZwRWIF49w).
 
-##Description
+# How to use with Litecoin ?
+
+>**Install-Package NBitcoin.Litecoin** 
+
+This is a light weight package with corresponding `Network` instances for Litecoin mainnet and testnet. [Sources](https://github.com/MetacoSA/NBitcoin.Litecoin)
+
+# How to use with my own blockchain?
+
+ If your crypto currency is similar enough to Bitcoin, please, check out how we integrated [litecoin to NBitcoin](https://github.com/MetacoSA/NBitcoin.Litecoin).
+
+# How to use in Unity 3.5
+
+In command prompt:
+
+```
+git clone https://github.com/MetacoSA/NBitcoin/
+cd NBitcoin
+git checkout unity35
+build-unity.bat
+```
+
+Then put the two libraries, NBitcoin.dll and System.Threading.Tasks.Net35.dll found in "NBitcoin\NBitcoin\bin\Release" into your asset folder.
+
+# How to use in .NET Core
+
+If you want to use .NET Core, first install .NET Core [as documented here](https://www.microsoft.com/net/core#windowsvs2017).
+
+Then:
+```
+mkdir MyProject
+cd MyProject
+dotnet new console
+dotnet add package NBitcoin
+dotnet restore
+```
+Then edit your Program.cs:
+```
+using System;
+using NBitcoin;
+
+namespace _125350929
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.WriteLine("Hello World! " + new Key().GetWif(Network.Main));
+        }
+    }
+}
+```
+You can then run with
+```
+dotnet run
+```
+
+We advice you to use [Visual Studio Code](https://code.visualstudio.com/) as the editor for your project.
+
+## Description
 NBitcoin notably includes:
 
 * A [TransactionBuilder](http://www.codeproject.com/Articles/835098/NBitcoin-Build-Them-All) supporting Stealth, Open Asset, and all standard transactions
@@ -32,6 +94,7 @@ NBitcoin notably includes:
 * The signing and verification with private keys (with support for compact signatures) for proving ownership
 * Bloom filters and partial merkle trees
 * Segregated Witness ([BIP 141](https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki), [BIP 143](https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki), [BIP 144](https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki))
+* Bech32 segwit address implementation with error detection [BIP 173](https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki)
 * Mnemonic code for generating deterministic keys ([BIP 39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki)), credits to [Thasshiznets](https://github.com/Thashiznets/BIP39.NET)
 * Hierarchical Deterministic Wallets ([BIP 32](https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki))
 * Payment Protocol ([BIP 70](https://github.com/bitcoin/bips/blob/master/bip-0070.mediawiki))
@@ -39,7 +102,7 @@ NBitcoin notably includes:
 * Two-Factor keys ([BIP 38](http://www.codeproject.com/Articles/775226/NBitcoin-Cryptography-Part))
 * Stealth Addresses ([Also on codeproject](http://www.codeproject.com/Articles/775226/NBitcoin-Cryptography-Part))
 
-NBitcoin is inspired by Bitcoin Core code but provides a simpler object oriented API (e.g., new Key().PubKey.Address.ToString() to generate a key and get the associated address). It relies on BountyCastle cryptography library instead of OpenSSL, yet replicates OpenSSL bugs to guarantee compatibility. NBitcoin also ports the integrality of Bitcoin Core unit tests with their original data in order to validate the compatibility of the two implementations.
+NBitcoin is inspired by Bitcoin Core code but provides a simpler object oriented API (e.g., new Key().PubKey.Address.ToString() to generate a key and get the associated address). It relies on BouncyCastle cryptography library instead of OpenSSL, yet replicates OpenSSL bugs to guarantee compatibility. NBitcoin also ports the integrality of Bitcoin Core unit tests with their original data in order to validate the compatibility of the two implementations.
 
 NBitcoin license is MIT and we encourage you to use it to explore, learn, debug, play, share and create software for Bitcoin and with other Metaco services.
 
@@ -64,5 +127,5 @@ NBitcoin license is MIT and we encourage you to use it to explore, learn, debug,
 Please, use github issues for questions or feedback. For confidential requests or specific demands, contact us on [Metaco support](mailto:support@metaco.com "support@metaco.com").
 
 
-##Useful link for a free IDE :
+## Useful link for a free IDE :
 Visual Studio Community Edition : [https://www.visualstudio.com/products/visual-studio-community-vs](https://www.visualstudio.com/products/visual-studio-community-vs "https://www.visualstudio.com/products/visual-studio-community-vs")

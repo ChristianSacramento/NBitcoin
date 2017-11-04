@@ -1,11 +1,6 @@
 ﻿using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Numerics;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace NBitcoin
 {
@@ -168,12 +163,18 @@ namespace NBitcoin
 			}
 		}
 
+		[Obsolete("Use AsKeyId().ScriptPubKey instead")]
 		public Script WitScriptPubKey
 		{
 			get
 			{
 				return new KeyId(_DestBytes).ScriptPubKey;
 			}
+		}
+
+		public KeyId AsKeyId()
+		{
+			return new KeyId(_DestBytes);
 		}
 
 		public override BitcoinAddress GetAddress(Network network)

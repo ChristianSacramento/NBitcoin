@@ -1,4 +1,5 @@
-﻿#if !NOSOCKET
+﻿#if !NOJSONNET
+#if !NOSOCKET
 using NBitcoin.DataEncoders;
 using NBitcoin.Protocol;
 using NBitcoin.Protocol.Behaviors;
@@ -299,6 +300,16 @@ namespace NBitcoin.SPV
 				_KnownScripts.Add(script, keyPath);
 				tracker.Add(script, false, isInternal, wallet: Name);
 			}
+		}
+
+		public bool Rescan(uint256 blockId)
+		{
+			var block = Chain?.GetBlock(blockId);
+			if(block == null)
+				return false;
+			_ScanLocation = block.GetLocator();
+			_Group?.Purge("Rescanning");
+			return true;
 		}
 
 		private bool AddKnownScriptToTracker()
@@ -693,7 +704,6 @@ namespace NBitcoin.SPV
 		public static void ConfigureDefaultNodeConnectionParameters(NodeConnectionParameters parameters)
 		{
 			parameters = parameters ?? new NodeConnectionParameters();
-			parameters.IsTrusted = false; //Connecting to the wild
 
 			//Optimize for small device
 			parameters.ReuseBuffer = false;
@@ -915,4 +925,5 @@ namespace NBitcoin.SPV
 		}
 	}
 }
+#endif
 #endif

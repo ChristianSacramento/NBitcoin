@@ -193,7 +193,8 @@ namespace NBitcoin.Protocol
 							evt.SetBuffer(bytes, 0, bytes.Length);
 							_Node.Counter.AddWritten(bytes.Length);
 							ar.Reset();
-							Socket.SendAsync(evt);
+							if(!Socket.SendAsync(evt))
+								Utils.SafeSet(ar);
 							WaitHandle.WaitAny(new WaitHandle[] { ar, Cancel.Token.WaitHandle }, -1);
 							if(!Cancel.Token.IsCancellationRequested)
 							{
@@ -276,7 +277,7 @@ namespace NBitcoin.Protocol
 						Cleanup(unhandledException);
 					}
 				}).Start();
-			}			
+			}
 
 			int _CleaningUp;
 			public int _ListenerThreadId;
@@ -286,13 +287,13 @@ namespace NBitcoin.Protocol
 					return;
 				if(!Cancel.IsCancellationRequested)
 				{
-					Node.State = NodeState.Failed;
 					NodeServerTrace.Error("Connection to server stopped unexpectedly", unhandledException);
 					Node.DisconnectReason = new NodeDisconnectReason()
 					{
 						Reason = "Unexpected exception while connecting to socket",
 						Exception = unhandledException
 					};
+					Node.State = NodeState.Failed;
 				}
 
 				if(Node.State != NodeState.Failed)
@@ -389,6 +390,7 @@ namespace NBitcoin.Protocol
 			}
 			if(version != null)
 			{
+				TimeOffset = DateTimeOffset.Now - version.Timestamp;
 				if((version.Services & NodeServices.NODE_WITNESS) != 0)
 					_SupportedTransactionOptions |= TransactionOptions.Witness;
 			}
@@ -491,13 +493,13 @@ namespace NBitcoin.Protocol
 		/// <param name="network">The network to connect to</param>
 		/// <param name="addrman">The addrman used for finding peers</param>
 		/// <param name="parameters">The parameters used by the found node</param>
-		/// <param name="connectedAddresses">The already connected addresses, the new address will be select outside of existing groups</param>
+		/// <param name="connectedEndpoints">The already connected endpoints, the new endpoint will be select outside of existing groups</param>
 		/// <returns></returns>
-		public static Node Connect(Network network, AddressManager addrman, NodeConnectionParameters parameters = null, IPAddress[] connectedAddresses = null)
+		public static Node Connect(Network network, AddressManager addrman, NodeConnectionParameters parameters = null, IPEndPoint[] connectedEndpoints = null)
 		{
 			parameters = parameters ?? new NodeConnectionParameters();
 			AddressManagerBehavior.SetAddrman(parameters, addrman);
-			return Connect(network, parameters, connectedAddresses);
+			return Connect(network, parameters, connectedEndpoints);
 		}
 
 		/// <summary>
@@ -505,33 +507,48 @@ namespace NBitcoin.Protocol
 		/// </summary>
 		/// <param name="network">The network to connect to</param>
 		/// <param name="parameters">The parameters used by the found node, use AddressManagerBehavior.GetAddrman for finding peers</param>
-		/// <param name="connectedAddresses">The already connected addresses, the new address will be select outside of existing groups</param>
+		/// <param name="connectedEndpoints">The already connected endpoints, the new endpoint will be select outside of existing groups</param>
+		/// <param name="getGroup">Group selector, by default NBicoin.IpExtensions.GetGroup</param>
 		/// <returns></returns>
-		public static Node Connect(Network network, NodeConnectionParameters parameters = null, IPAddress[] connectedAddresses = null)
+		public static Node Connect(Network network, NodeConnectionParameters parameters = null, IPEndPoint[] connectedEndpoints = null, Func<IPEndPoint, byte[]> getGroup = null)
 		{
-			connectedAddresses = connectedAddresses ?? new IPAddress[0];
+			getGroup = getGroup ?? new Func<IPEndPoint, byte[]>((a) => IpExtensions.GetGroup(a.Address));
+			connectedEndpoints = connectedEndpoints ?? new IPEndPoint[0];
 			parameters = parameters ?? new NodeConnectionParameters();
-			var addrman = AddressManagerBehavior.GetAddrman(parameters) ?? new AddressManager();
+			var addrmanBehavior = parameters.TemplateBehaviors.FindOrCreate(() => new AddressManagerBehavior(new AddressManager()));
+			var addrman = AddressManagerBehavior.GetAddrman(parameters);
 			DateTimeOffset start = DateTimeOffset.UtcNow;
 			while(true)
 			{
 				parameters.ConnectCancellation.ThrowIfCancellationRequested();
 				if(addrman.Count == 0 || DateTimeOffset.UtcNow - start > TimeSpan.FromSeconds(60))
 				{
-					addrman.DiscoverPeers(network, parameters);
+					addrmanBehavior.DiscoverPeers(network, parameters);
 					start = DateTimeOffset.UtcNow;
 				}
 				NetworkAddress addr = null;
+				int groupFail = 0;
 				while(true)
 				{
+					if(groupFail > 50)
+					{
+						parameters.ConnectCancellation.WaitHandle.WaitOne((int)TimeSpan.FromSeconds(60).TotalMilliseconds);
+						break;
+					}
 					addr = addrman.Select();
 					if(addr == null)
+					{
+						parameters.ConnectCancellation.WaitHandle.WaitOne(1000);
 						break;
+					}
 					if(!addr.Endpoint.Address.IsValid())
 						continue;
-					var groupExist = connectedAddresses.Any(a => a.GetGroup().SequenceEqual(addr.Endpoint.Address.GetGroup()));
+					var groupExist = connectedEndpoints.Any(a => getGroup(a).SequenceEqual(getGroup(addr.Endpoint)));
 					if(groupExist)
+					{
+						groupFail++;
 						continue;
+					}
 					break;
 				}
 				if(addr == null)
@@ -667,6 +684,7 @@ namespace NBitcoin.Protocol
 						throw new SocketException((int)args.SocketError);
 					var remoteEndpoint = (IPEndPoint)(socket.RemoteEndPoint ?? args.RemoteEndPoint);
 					_RemoteSocketAddress = remoteEndpoint.Address;
+					_RemoteSocketEndpoint = remoteEndpoint;
 					_RemoteSocketPort = remoteEndpoint.Port;
 					State = NodeState.Connected;
 					ConnectedAt = DateTimeOffset.UtcNow;
@@ -704,6 +722,7 @@ namespace NBitcoin.Protocol
 		internal Node(NetworkAddress peer, Network network, NodeConnectionParameters parameters, Socket socket, VersionPayload peerVersion)
 		{
 			_RemoteSocketAddress = ((IPEndPoint)socket.RemoteEndPoint).Address;
+			_RemoteSocketEndpoint = ((IPEndPoint)socket.RemoteEndPoint);
 			_RemoteSocketPort = ((IPEndPoint)socket.RemoteEndPoint).Port;
 			Inbound = true;
 			_Behaviors = new NodeBehaviorsCollection(this);
@@ -732,6 +751,15 @@ namespace NBitcoin.Protocol
 			}
 		}
 
+		IPEndPoint _RemoteSocketEndpoint;
+		public IPEndPoint RemoteSocketEndpoint
+		{
+			get
+			{
+				return _RemoteSocketEndpoint;
+			}
+		}
+
 		int _RemoteSocketPort;
 		public int RemoteSocketPort
 		{
@@ -750,7 +778,6 @@ namespace NBitcoin.Protocol
 		bool _ReuseBuffer;
 		private void InitDefaultBehaviors(NodeConnectionParameters parameters)
 		{
-			IsTrusted = parameters.IsTrusted != null ? parameters.IsTrusted.Value : Peer.Endpoint.Address.IsLocal();
 			Advertize = parameters.Advertize;
 			PreferredTransactionOptions = parameters.PreferredTransactionOptions;
 			_ReuseBuffer = parameters.ReuseBuffer;
@@ -782,6 +809,12 @@ namespace NBitcoin.Protocol
 		}
 
 		public DateTimeOffset LastSeen
+		{
+			get;
+			private set;
+		}
+
+		public TimeSpan? TimeOffset
 		{
 			get;
 			private set;
@@ -1143,6 +1176,7 @@ namespace NBitcoin.Protocol
 			NodeServerTrace.Information("Building chain");
 			using(var listener = this.CreateListener().OfType<HeadersPayload>())
 			{
+				int acceptMaxReorgDepth = 0;
 				while(true)
 				{
 					//Get before last so, at the end, we should only receive 1 header equals to this one (so we will not have race problems with concurrent GetChains)
@@ -1156,18 +1190,22 @@ namespace NBitcoin.Protocol
 					while(true)
 					{
 						bool isOurs = false;
-						var headersCancel = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); //30 sec delay before reasking GetHeaders
-						headersCancel.CancelAfter(PollHeaderDelay);
 						HeadersPayload headers = null;
-						try
+
+						using(var headersCancel = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
 						{
-							headers = listener.ReceivePayload<HeadersPayload>(headersCancel.Token);
-						}
-						catch(OperationCanceledException)
-						{
-							if(cancellationToken.IsCancellationRequested)
-								throw;
-							break; //Send a new GetHeaders
+							headersCancel.CancelAfter(PollHeaderDelay);
+							try
+							{
+								headers = listener.ReceivePayload<HeadersPayload>(headersCancel.Token);
+							}
+							catch(OperationCanceledException)
+							{
+								acceptMaxReorgDepth += 6;
+								if(cancellationToken.IsCancellationRequested)
+									throw;
+								break; //Send a new GetHeaders
+							}
 						}
 						if(headers.Headers.Count == 0 && PeerVersion.StartHeight == 0 && currentTip.HashBlock == Network.GenesisHash) //In the special case where the remote node is at height 0 as well as us, then the headers count will be 0
 							yield break;
@@ -1178,6 +1216,21 @@ namespace NBitcoin.Protocol
 							var h = header.GetHash();
 							if(h == currentTip.HashBlock)
 								continue;
+
+							//The previous headers request timeout, this can arrive in case of big reorg
+							if(header.HashPrevBlock != currentTip.HashBlock)
+							{
+								int reorgDepth = 0;
+								var tempCurrentTip = currentTip;
+								while(reorgDepth != acceptMaxReorgDepth && tempCurrentTip != null && header.HashPrevBlock != tempCurrentTip.HashBlock)
+								{
+									reorgDepth++;
+									tempCurrentTip = tempCurrentTip.Previous;
+								}
+								if(reorgDepth != acceptMaxReorgDepth && tempCurrentTip != null)
+									currentTip = tempCurrentTip;
+							}
+
 							if(header.HashPrevBlock == currentTip.HashBlock)
 							{
 								isOurs = true;
@@ -1211,27 +1264,17 @@ namespace NBitcoin.Protocol
 			if(headers.Count == 0)
 				return new ChainedBlock[0];
 			var newTip = headers[headers.Count - 1];
-			if(!IsTrusted)
+
+			if(newTip.Height <= oldTip.Height)
+				throw new ProtocolException("No tip should have been recieved older than the local one");
+			foreach(var header in headers)
 			{
-				if(newTip.Height <= oldTip.Height)
-					throw new ProtocolException("No tip should have been recieved older than the local one");
-				foreach(var header in headers)
-				{
-					if(!header.Validate(Network))
-						throw new ProtocolException("An header which does not pass proof of work verification has been received");
-				}
+				if(!header.Validate(Network))
+					throw new ProtocolException("An header which does not pass proof of work verification has been received");
 			}
+
 			chain.SetTip(newTip);
 			return headers;
-		}
-
-		/// <summary>
-		/// Will verify proof of work during chain operations
-		/// </summary>
-		public bool IsTrusted
-		{
-			get;
-			set;
 		}
 
 		public IEnumerable<Block> GetBlocks(uint256 hashStop = null, CancellationToken cancellationToken = default(CancellationToken))
@@ -1331,7 +1374,14 @@ namespace NBitcoin.Protocol
 			using(var listener = CreateListener().OfType<InvPayload>())
 			{
 				this.SendMessageAsync(new MempoolPayload());
-				return listener.ReceivePayload<InvPayload>(cancellationToken).Inventory.Select(i => i.Hash).ToArray();
+				var invs = listener.ReceivePayload<InvPayload>(cancellationToken).Inventory.Select(i => i.Hash).ToList();
+				var result = invs;
+				while(invs.Count == InvPayload.MAX_INV_SZ)
+				{
+					invs = listener.ReceivePayload<InvPayload>(cancellationToken).Inventory.Select(i => i.Hash).ToList();
+					result.AddRange(invs);
+				}
+				return result.ToArray();
 			}
 		}
 
@@ -1368,15 +1418,17 @@ namespace NBitcoin.Protocol
 					}).ToArray()));
 					try
 					{
-						while(result.Count < batch.Count)
+						List<Transaction> batchResult = new List<NBitcoin.Transaction>();
+						while(batchResult.Count < batch.Count)
 						{
 							CancellationTokenSource timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10.0));
 							var payload = listener.ReceivePayload<Payload>(CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token).Token);
 							if(payload is NotFoundPayload)
-								result.Add(null);
+								batchResult.Add(null);
 							else
-								result.Add(((TxPayload)payload).Object);
+								batchResult.Add(((TxPayload)payload).Object);
 						}
+						result.AddRange(batchResult);
 					}
 					catch(OperationCanceledException)
 					{

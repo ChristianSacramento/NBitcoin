@@ -1,4 +1,5 @@
-﻿using System;
+﻿using NBitcoin.BouncyCastle.Math;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -56,7 +57,7 @@ namespace NBitcoin
 			}
 		}
 
-		System.Numerics.BigInteger _ChainWork;
+		BigInteger _ChainWork;
 		public uint256 ChainWork
 		{
 			get
@@ -93,20 +94,20 @@ namespace NBitcoin
 
 		private void CalculateChainWork()
 		{
-			_ChainWork = (Previous == null ? System.Numerics.BigInteger.Zero : Previous._ChainWork) + GetBlockProof();
+			_ChainWork = (Previous == null ? BigInteger.Zero : Previous._ChainWork).Add(GetBlockProof());
 		}
 
-		static System.Numerics.BigInteger Pow256 = System.Numerics.BigInteger.Pow(2, 256);
-		private System.Numerics.BigInteger GetBlockProof()
+		static BigInteger Pow256 = BigInteger.ValueOf(2).Pow(256);
+		private BigInteger GetBlockProof()
 		{
 			var bnTarget = Header.Bits.ToBigInteger();
-			if(bnTarget <= System.Numerics.BigInteger.Zero || bnTarget >= Pow256)
-				return System.Numerics.BigInteger.Zero;
+			if(bnTarget.CompareTo(BigInteger.Zero) <= 0 || bnTarget.CompareTo(Pow256) >= 0)
+				return BigInteger.Zero;
 			// We need to compute 2**256 / (bnTarget+1), but we can't represent 2**256
 			// as it's too large for a arith_uint256. However, as 2**256 is at least as large
 			// as bnTarget+1, it is equal to ((2**256 - bnTarget - 1) / (bnTarget+1)) + 1,
 			// or ~bnTarget / (nTarget+1) + 1.
-			return ((Pow256 - bnTarget - 1) / (bnTarget + 1)) + 1;
+			return ((Pow256.Subtract(bnTarget).Subtract(BigInteger.One)).Divide(bnTarget.Add(BigInteger.One))).Add(BigInteger.One);
 		}
 
 		public ChainedBlock(BlockHeader header, int height)
@@ -272,11 +273,21 @@ namespace NBitcoin
 				return pindexLast.Header.Bits;
 			}
 
-			// Go back by what we want to be 14 days worth of blocks
-			var pastHeight = pindexLast.Height - (consensus.DifficultyAdjustmentInterval - 1);
+			long pastHeight = 0;
+			if(consensus.LitecoinWorkCalculation)
+			{
+				long blockstogoback = consensus.DifficultyAdjustmentInterval - 1;
+				if((pindexLast.Height + 1) != consensus.DifficultyAdjustmentInterval)
+					blockstogoback = consensus.DifficultyAdjustmentInterval;
+				pastHeight = pindexLast.Height - blockstogoback;
+			}
+			else
+			{
+				// Go back by what we want to be 14 days worth of blocks
+				pastHeight = pindexLast.Height - (consensus.DifficultyAdjustmentInterval - 1);
+			}
 			ChainedBlock pindexFirst = this.EnumerateToGenesis().FirstOrDefault(o => o.Height == pastHeight);
 			assert(pindexFirst);
-
 			if(consensus.PowNoRetargeting)
 				return pindexLast.header.Bits;
 
@@ -289,8 +300,8 @@ namespace NBitcoin
 
 			// Retarget
 			var bnNew = pindexLast.Header.Bits.ToBigInteger();
-			bnNew *= (ulong)nActualTimespan.TotalSeconds;
-			bnNew /= (ulong)consensus.PowTargetTimespan.TotalSeconds;
+			bnNew = bnNew.Multiply(BigInteger.ValueOf((long)nActualTimespan.TotalSeconds));
+			bnNew = bnNew.Divide(BigInteger.ValueOf((long)consensus.PowTargetTimespan.TotalSeconds));
 			var newTarget = new Target(bnNew);
 			if(newTarget > nProofOfWorkLimit)
 				newTarget = nProofOfWorkLimit;
@@ -320,18 +331,35 @@ namespace NBitcoin
 				throw new NotSupportedException("Can only calculate work of a full chain");
 		}
 
+		/// <summary>
+		/// Check PoW and that the blocks connect correctly
+		/// </summary>
+		/// <param name="network">The network being used</param>
+		/// <returns>True if PoW is correct</returns>
 		public bool Validate(Network network)
 		{
 			if(network == null)
 				throw new ArgumentNullException("network");
+			var genesisCorrect = Height != 0 || HashBlock == network.GetGenesis().GetHash();
+			return genesisCorrect && Validate(network.Consensus);
+		}
+
+		/// <summary>
+		/// Check PoW and that the blocks connect correctly
+		/// </summary>
+		/// <param name="consensus">The consensus being used</param>
+		/// <returns>True if PoW is correct</returns>
+		public bool Validate(Consensus consensus)
+		{
+			if(consensus == null)
+				throw new ArgumentNullException("consensus");
 			if(Height != 0 && Previous == null)
 				return false;
 			var heightCorrect = Height == 0 || Height == Previous.Height + 1;
-			var genesisCorrect = Height != 0 || HashBlock == network.GetGenesis().GetHash();
 			var hashPrevCorrect = Height == 0 || Header.HashPrevBlock == Previous.HashBlock;
 			var hashCorrect = HashBlock == Header.GetHash();
-			var workCorrect = CheckProofOfWorkAndTarget(network);
-			return heightCorrect && genesisCorrect && hashPrevCorrect && hashCorrect && workCorrect;
+			var workCorrect = CheckProofOfWorkAndTarget(consensus);
+			return heightCorrect && hashPrevCorrect && hashCorrect && workCorrect;
 		}
 
 		public bool CheckProofOfWorkAndTarget(Network network)
@@ -341,7 +369,34 @@ namespace NBitcoin
 
 		public bool CheckProofOfWorkAndTarget(Consensus consensus)
 		{
-			return Height == 0 || (Header.CheckProofOfWork() && Header.Bits <= GetWorkRequired(consensus));
+			return Height == 0 || (Header.CheckProofOfWork(consensus) && Header.Bits == GetWorkRequired(consensus));
+		}
+
+
+		/// <summary>
+		/// Find first common block between two chains
+		/// </summary>
+		/// <param name="block">The tip of the other chain</param>
+		/// <returns>First common block or null</returns>
+		public ChainedBlock FindFork(ChainedBlock block)
+		{
+			if(block == null)
+				throw new ArgumentNullException("block");
+
+			var highChain = this.Height > block.Height ? this : block;
+			var lowChain = highChain == this ? block : this;
+			while(highChain.Height != lowChain.Height)
+			{
+				highChain = highChain.Previous;
+			}
+			while(highChain.HashBlock != lowChain.HashBlock)
+			{
+				lowChain = lowChain.Previous;
+				highChain = highChain.Previous;
+				if(lowChain == null || highChain == null)
+					return null;
+			}
+			return highChain;
 		}
 
 		public ChainedBlock GetAncestor(int height)

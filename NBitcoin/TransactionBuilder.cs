@@ -1,4 +1,5 @@
 ﻿using NBitcoin.BuilderExtensions;
+using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
 using NBitcoin.OpenAsset;
 using NBitcoin.Policy;
@@ -208,6 +209,63 @@ namespace NBitcoin
 
 			#endregion
 		}
+
+		class KnownSignatureSigner : ISigner, IKeyRepository
+		{
+			private ICoin coin;
+			private SigHash sigHash;
+			private IndexedTxIn txIn;
+			private List<Tuple<PubKey, ECDSASignature>> _KnownSignatures;
+			private Dictionary<KeyId, ECDSASignature> _VerifiedSignatures = new Dictionary<KeyId, ECDSASignature>();
+			private Dictionary<uint256, PubKey> _DummyToRealKey = new Dictionary<uint256, PubKey>();
+
+
+			public KnownSignatureSigner(List<Tuple<PubKey, ECDSASignature>> _KnownSignatures, ICoin coin, SigHash sigHash, IndexedTxIn txIn)
+			{
+				this._KnownSignatures = _KnownSignatures;
+				this.coin = coin;
+				this.sigHash = sigHash;
+				this.txIn = txIn;
+			}
+
+			public Key FindKey(Script scriptPubKey)
+			{
+				foreach(var tv in _KnownSignatures.Where(tv => IsCompatibleKey(tv.Item1, scriptPubKey)))
+				{
+					var hash = txIn.GetSignatureHash(coin, sigHash);
+					if(tv.Item1.Verify(hash, tv.Item2))
+					{
+						var key = new Key();
+						_DummyToRealKey.Add(Hashes.Hash256(key.PubKey.ToBytes()), tv.Item1);
+						_VerifiedSignatures.AddOrReplace(key.PubKey.Hash, tv.Item2);
+						return key;
+					}
+				}
+				return null;
+			}
+
+			public Script ReplaceDummyKeys(Script script)
+			{
+				var ops = script.ToOps().ToList();
+				List<Op> result = new List<Op>();
+				foreach(var op in ops)
+				{
+					var h = Hashes.Hash256(op.PushData);
+					PubKey real;
+					if(_DummyToRealKey.TryGetValue(h, out real))
+						result.Add(Op.GetPushOp(real.ToBytes()));
+					else
+						result.Add(op);
+				}
+				return new Script(result.ToArray());
+			}
+
+			public TransactionSignature Sign(Key key)
+			{
+				return new TransactionSignature(_VerifiedSignatures[key.PubKey.Hash], sigHash);
+			}
+		}
+
 		internal class TransactionSigningContext
 		{
 			public TransactionSigningContext(TransactionBuilder builder, Transaction transaction)
@@ -521,13 +579,39 @@ namespace NBitcoin
 
 		public TransactionBuilder AddKeys(params ISecret[] keys)
 		{
-			_Keys.AddRange(keys.Select(k => k.PrivateKey));
+			AddKeys(keys.Select(k => k.PrivateKey).ToArray());
 			return this;
 		}
 
 		public TransactionBuilder AddKeys(params Key[] keys)
 		{
 			_Keys.AddRange(keys);
+			foreach(var k in keys)
+			{
+				AddKnownRedeems(k.PubKey.ScriptPubKey);
+				AddKnownRedeems(k.PubKey.WitHash.ScriptPubKey);
+				AddKnownRedeems(k.PubKey.Hash.ScriptPubKey);
+			}
+			return this;
+		}
+
+		public TransactionBuilder AddKnownSignature(PubKey pubKey, TransactionSignature signature)
+		{
+			if(pubKey == null)
+				throw new ArgumentNullException("pubKey");
+			if(signature == null)
+				throw new ArgumentNullException("signature");
+			_KnownSignatures.Add(Tuple.Create(pubKey, signature.Signature));
+			return this;
+		}
+
+		public TransactionBuilder AddKnownSignature(PubKey pubKey, ECDSASignature signature)
+		{
+			if(pubKey == null)
+				throw new ArgumentNullException("pubKey");
+			if(signature == null)
+				throw new ArgumentNullException("signature");
+			_KnownSignatures.Add(Tuple.Create(pubKey, signature));
 			return this;
 		}
 
@@ -579,16 +663,47 @@ namespace NBitcoin
 		{
 			if(amount < Money.Zero)
 				throw new ArgumentOutOfRangeException("amount", "amount can't be negative");
+			_LastSendBuilder = null; //If the amount is dust, we don't want the fee to be paid by the previous Send
 			if(DustPrevention && amount < GetDust(scriptPubKey) && !_OpReturnTemplate.CheckScriptPubKey(scriptPubKey))
 			{
 				SendFees(amount);
 				return this;
 			}
-			CurrentGroup.Builders.Add(ctx =>
+
+			var builder = new SendBuilder(new TxOut(amount, scriptPubKey));
+			CurrentGroup.Builders.Add(builder.Build);
+			_LastSendBuilder = builder;
+			return this;
+		}
+
+		SendBuilder _LastSendBuilder;
+		SendBuilder _SubstractFeeBuilder;
+
+		class SendBuilder
+		{
+			internal TxOut _TxOut;
+
+			public SendBuilder(TxOut txout)
 			{
-				ctx.Transaction.Outputs.Add(new TxOut(amount, scriptPubKey));
-				return amount;
-			});
+				_TxOut = txout;
+			}
+
+			public Money Build(TransactionBuildingContext ctx)
+			{
+				ctx.Transaction.Outputs.Add(_TxOut);
+				return _TxOut.Value;
+			}
+		}
+
+		/// <summary>
+		/// Will subtract fees from the previous TxOut added by the last TransactionBuidler.Send() call
+		/// </summary>
+		/// <returns></returns>
+		public TransactionBuilder SubtractFees()
+		{
+			if(_LastSendBuilder == null)
+				throw new InvalidOperationException("No call to TransactionBuilder.Send has been done which can support the fees");
+			_SubstractFeeBuilder = _LastSendBuilder;
 			return this;
 		}
 
@@ -807,8 +922,11 @@ namespace NBitcoin
 			if(fees == null)
 				throw new ArgumentNullException("fees");
 			CurrentGroup.Builders.Add(ctx => fees);
+			_TotalFee += fees;
 			return this;
 		}
+
+		Money _TotalFee = Money.Zero;
 
 		/// <summary>
 		/// Split the estimated fees accross the several groups (separated by Then())
@@ -969,7 +1087,23 @@ namespace NBitcoin
 			IMoney zero)
 		{
 			var originalCtx = ctx.CreateMemento();
-			var target = builders.Concat(ctx.AdditionalBuilders).Select(b => b(ctx)).Sum(zero);
+			var fees = _TotalFee + ctx.AdditionalFees;
+
+			// Replace the _SubstractFeeBuilder by another one with the fees substracts
+			var builderList = builders.ToList();
+			for(int i = 0; i < builderList.Count; i++)
+			{
+				if(builderList[i].Target == _SubstractFeeBuilder)
+				{
+					builderList.Remove(builderList[i]);
+					var newTxOut = _SubstractFeeBuilder._TxOut.Clone();
+					newTxOut.Value -= fees;
+					builderList.Insert(i, new SendBuilder(newTxOut).Build);
+				}
+			}
+			////////////////////////////////////////////////////////
+
+			var target = builderList.Concat(ctx.AdditionalBuilders).Select(b => b(ctx)).Sum(zero);
 			if(ctx.CoverOnly != null)
 			{
 				target = ctx.CoverOnly.Add(ctx.ChangeAmount);
@@ -1277,7 +1411,7 @@ namespace NBitcoin
 		{
 			if(coin is IColoredCoin)
 				coin = ((IColoredCoin)coin).Bearer;
-			
+
 			if(coin is ScriptCoin)
 			{
 				var scriptCoin = (ScriptCoin)coin;
@@ -1304,7 +1438,7 @@ namespace NBitcoin
 			{
 				if(extension.CanEstimateScriptSigSize(scriptPubkey))
 				{
-					scriptSigSize = extension.EstimateScriptSigSize(scriptPubkey);					
+					scriptSigSize = extension.EstimateScriptSigSize(scriptPubkey);
 					break;
 				}
 			}
@@ -1465,30 +1599,51 @@ namespace NBitcoin
 			var scriptPubKey = coin.GetScriptCode();
 			var keyRepo = new TransactionBuilderKeyRepository(this, ctx);
 			var signer = new TransactionBuilderSigner(coin, ctx.SigHash, txIn);
+
+			var signer2 = new KnownSignatureSigner(_KnownSignatures, coin, ctx.SigHash, txIn);
+
 			foreach(var extension in Extensions)
 			{
 				if(extension.CanGenerateScriptSig(scriptPubKey))
 				{
-					return extension.GenerateScriptSig(scriptPubKey, keyRepo, signer);
+					var scriptSig1 = extension.GenerateScriptSig(scriptPubKey, keyRepo, signer);
+					var scriptSig2 = extension.GenerateScriptSig(scriptPubKey, signer2, signer2);
+					if(scriptSig2 != null)
+					{
+						scriptSig2 = signer2.ReplaceDummyKeys(scriptSig2);
+					}
+					if(scriptSig1 != null && scriptSig2 != null && extension.CanCombineScriptSig(scriptPubKey, scriptSig1, scriptSig2))
+					{
+						var combined = extension.CombineScriptSig(scriptPubKey, scriptSig1, scriptSig2);
+						return combined;
+					}
+					return scriptSig1 ?? scriptSig2;
 				}
 			}
+
 			throw new NotSupportedException("Unsupported scriptPubKey");
 		}
 
+		List<Tuple<PubKey, ECDSASignature>> _KnownSignatures = new List<Tuple<PubKey, ECDSASignature>>();
 
 		private Key FindKey(TransactionSigningContext ctx, Script scriptPubKey)
 		{
 			var key = _Keys
 				.Concat(ctx.AdditionalKeys)
-				.FirstOrDefault(k => k.PubKey.ScriptPubKey == scriptPubKey ||  //P2PK
-									k.PubKey.Hash.ScriptPubKey == scriptPubKey || //P2PKH
-									k.PubKey.ScriptPubKey.Hash.ScriptPubKey == scriptPubKey || //P2PK P2SH
-									k.PubKey.Hash.ScriptPubKey.Hash.ScriptPubKey == scriptPubKey); //P2PKH P2SH
+				.FirstOrDefault(k => IsCompatibleKey(k.PubKey, scriptPubKey));
 			if(key == null && KeyFinder != null)
 			{
 				key = KeyFinder(scriptPubKey);
 			}
 			return key;
+		}
+
+		private static bool IsCompatibleKey(PubKey k, Script scriptPubKey)
+		{
+			return k.ScriptPubKey == scriptPubKey ||  //P2PK
+					k.Hash.ScriptPubKey == scriptPubKey || //P2PKH
+					k.ScriptPubKey.Hash.ScriptPubKey == scriptPubKey || //P2PK P2SH
+					k.Hash.ScriptPubKey.Hash.ScriptPubKey == scriptPubKey; //P2PKH P2SH
 		}
 
 		/// <summary>

@@ -18,6 +18,10 @@ namespace NBitcoin
 				{
 					return _Value;
 				}
+				set
+				{
+					_Value = value;
+				}
 			}
 			public MutableUint256()
 			{
@@ -395,6 +399,10 @@ namespace NBitcoin
 				get
 				{
 					return _Value;
+				}
+				set
+				{
+					_Value = value;
 				}
 			}
 			public MutableUint160()

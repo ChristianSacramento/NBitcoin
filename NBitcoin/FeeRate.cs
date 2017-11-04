@@ -53,18 +53,31 @@ namespace NBitcoin
 		/// <summary>
 		/// Get fee for the size
 		/// </summary>
-		/// <param name="size">Size in bytes</param>
+		/// <param name="virtualSize">Size in bytes</param>
 		/// <returns></returns>
-		public Money GetFee(int size)
+		public Money GetFee(int virtualSize)
 		{
-			Money nFee = _FeePerK.Satoshi * size / 1000;
+			Money nFee = _FeePerK.Satoshi * virtualSize / 1000;
 			if(nFee == 0 && _FeePerK.Satoshi > 0)
 				nFee = _FeePerK.Satoshi;
 			return nFee;
 		}
 		public Money GetFee(Transaction tx)
 		{
-			return GetFee(tx.GetSerializedSize());
+			return GetFee(tx.GetVirtualSize());
+		}
+
+		public override bool Equals(object obj)
+		{
+			if(Object.ReferenceEquals(this, obj))
+				return true;
+			if(((object)this == null) || (obj == null))
+				return false;
+			var left = this;
+			var right = obj as FeeRate;
+			if(right == null)
+				return false;
+			return left._FeePerK == right._FeePerK;
 		}
 
 		public override string ToString()

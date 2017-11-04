@@ -1,5 +1,6 @@
 ﻿#if !NOFILEIO
 using NBitcoin.BitcoinCore;
+using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
 using NBitcoin.OpenAsset;
 using NBitcoin.Protocol;
@@ -232,49 +233,6 @@ namespace NBitcoin.Tests
 				count++;
 			}
 			Assert.Equal(40, count);
-		}
-		[Fact]
-		[Trait("UnitTest", "UnitTest")]
-		public static void CanRequestBlockr()
-		{
-			var repo = new BlockrTransactionRepository(Network.Main);
-			var result = repo.Get("c3462373f1a722c66cbb1b93712df94aa7b3731f4142cd8413f10c9e872927de");
-			Assert.NotNull(result);
-			Assert.Equal("c3462373f1a722c66cbb1b93712df94aa7b3731f4142cd8413f10c9e872927de", result.GetHash().ToString());
-
-			result = repo.Get("c3462373f1a722c66cbb1b93712df94aa7b3731f4142cd8413f10c9e872927df");
-			Assert.Null(result);
-
-			var unspent = repo.GetUnspentAsync("1KF8kUVHK42XzgcmJF4Lxz4wcL5WDL97PB").Result;
-			Assert.True(unspent.Count != 0);
-
-			repo = new BlockrTransactionRepository(Network.TestNet);
-			result = repo.Get("7d4c5d69a85c70ff70daff789114b9b76fb6d2613ac18764bd96f0a2b9358782");
-			Assert.NotNull(result);
-
-			unspent = repo.GetUnspentAsync("2N66DDrmjDCMM3yMSYtAQyAqRtasSkFhbmX").Result;
-			Assert.True(unspent.Count != 0);
-		}
-		[Fact]
-		[Trait("UnitTest", "UnitTest")]
-		public static void CanPushTxBlockr()
-		{
-			var repo = new BlockrTransactionRepository(Network.Main);
-			var result = repo.Get("c3462373f1a722c66cbb1b93712df94aa7b3731f4142cd8413f10c9e872927de");
-			Assert.NotNull(result);
-			Assert.Equal("c3462373f1a722c66cbb1b93712df94aa7b3731f4142cd8413f10c9e872927de", result.GetHash().ToString());
-
-			var pushPath = BlockrTransactionRepository.PushPath;
-
-			try
-			{
-				BlockrTransactionRepository.PushPath = "tx/decode";
-				repo.Put(result);
-			}
-			finally
-			{
-				BlockrTransactionRepository.PushPath = pushPath;
-			}
 		}
 
 		[Fact]

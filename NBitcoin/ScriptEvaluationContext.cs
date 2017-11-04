@@ -4,7 +4,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
 
 namespace NBitcoin
 {
@@ -1094,7 +1093,7 @@ namespace NBitcoin
 										return SetError(ScriptError.InvalidStackOperation);
 
 									var vch = _stack.Top(-1);
-									_stack.Insert(0, vch);
+									_stack.Insert(-3, vch);
 									break;
 								}
 							case OpcodeType.OP_SIZE:
@@ -2150,10 +2149,13 @@ namespace NBitcoin
 		public void Insert(int position, T value)
 		{
 			EnsureSize();
-			var newArray = new T[_array.Length];
-			Array.Copy(_array, position, newArray, position + 1, _position - position + 1);
-			_array = newArray;
-			_array[position] = value;
+
+			position = Count + position;
+			for(int i = _position; i >= position + 1; i--)
+			{
+				_array[i + 1] = _array[i];
+			}
+			_array[position + 1] = value;
 			_position++;
 		}
 
@@ -2173,14 +2175,13 @@ namespace NBitcoin
 		/// <param name="to">The item position</param>
 		public void Remove(int from, int to)
 		{
-			var dest = new T[_array.Length];
-			var f = Count + from;
-			var t = Count + to;
-			var diff = t - f;
-			Array.Copy(_array, 0, dest, 0, f);
-			Array.Copy(_array, t, dest, f, _position - diff + 1);
-			_array = dest;
-			_position -= diff;
+			int toRemove = to - from;
+			for(int i = Count + from; i < Count + from + toRemove; i++)
+			{
+				for(int y = Count + from; y < Count; y++)
+					_array[y] = _array[y + 1];
+			}
+			_position -= toRemove;
 		}
 
 		private void EnsureSize()

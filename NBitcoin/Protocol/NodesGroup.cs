@@ -3,12 +3,69 @@ using NBitcoin.Protocol.Behaviors;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace NBitcoin.Protocol
 {
+	public class WellKnownGroupSelectors
+	{
+		static Random _Rand = new Random();
+		static Func<IPEndPoint, byte[]> _GroupByRandom;
+		public static Func<IPEndPoint, byte[]> ByRandom
+		{
+			get
+			{
+				return _GroupByRandom = _GroupByRandom ?? new Func<IPEndPoint, byte[]>((ip) =>{
+
+					var group = new byte[20];
+					_Rand.NextBytes(group);
+					return group;
+				});
+			}
+		}
+
+
+		static Func<IPEndPoint, byte[]> _GroupByIp;
+		public static Func<IPEndPoint, byte[]> ByIp
+		{
+			get
+			{
+				return _GroupByIp = _GroupByIp ?? new Func<IPEndPoint, byte[]>((ip) => {
+					return ip.Address.GetAddressBytes();	
+				});
+			}
+		}
+
+		static Func<IPEndPoint, byte[]> _GroupByEndpoint;
+		public static Func<IPEndPoint, byte[]> ByEndpoint
+		{
+			get
+			{
+				return _GroupByEndpoint = _GroupByEndpoint ?? new Func<IPEndPoint, byte[]>((endpoint) => {
+					var bytes = endpoint.Address.GetAddressBytes();
+					var port = Utils.ToBytes((uint)endpoint.Port, true);
+					var result = new byte[bytes.Length + port.Length];
+					Array.Copy(bytes, result, bytes.Length);
+					Array.Copy(port, 0, result, bytes.Length, port.Length);
+					return result;
+				});
+			}
+		}
+
+		static Func<IPEndPoint, byte[]> _GroupByNetwork;
+		public static Func<IPEndPoint, byte[]> ByNetwork
+		{
+			get
+			{
+				return _GroupByNetwork = _GroupByNetwork ?? new Func<IPEndPoint, byte[]>((ip) => {
+					return IpExtensions.GetGroup(ip.Address);
+				});
+			}
+		}
+	}
 	public class NodesGroup : IDisposable
 	{
 		TraceCorrelation _Trace = new TraceCorrelation(NodeServerTrace.Trace, "Group connection");
@@ -101,7 +158,9 @@ namespace NBitcoin.Protocol
 							Node node = null;
 							try
 							{
-								node = Node.Connect(_Network, parameters, AllowSameGroup ? null : _ConnectedNodes.Select(n => n.RemoteSocketAddress).ToArray());
+								var groupSelector = CustomGroupSelector != null ? CustomGroupSelector :
+													AllowSameGroup ? WellKnownGroupSelectors.ByRandom : null;
+								node = Node.Connect(_Network, parameters, _ConnectedNodes.Select(n => n.RemoteSocketEndpoint).ToArray(), groupSelector);
 								var timeout = CancellationTokenSource.CreateLinkedTokenSource(_Disconnect.Token);
 								timeout.CancelAfter(5000);
 								node.VersionHandshake(_Requirements, timeout.Token);
@@ -110,7 +169,7 @@ namespace NBitcoin.Protocol
 							catch(OperationCanceledException ex)
 							{
 								if(_Disconnect.Token.IsCancellationRequested)
-									throw;
+									break;
 								NodeServerTrace.Error("Timeout for picked node", ex);
 								if(node != null)
 									node.DisconnectAsync("Handshake timeout", ex);
@@ -198,12 +257,22 @@ namespace NBitcoin.Protocol
 		}
 
 		/// <summary>
-		/// If false, the search process will do its best to connect to Node in different network group to prevent sybil attacks (Default : false)
+		/// If false, the search process will do its best to connect to Node in different network group to prevent sybil attacks. (Default : false)
+		/// If CustomGroupSelector is set, AllowSameGroup is ignored.
 		/// </summary>
 		public bool AllowSameGroup
 		{
 			get;
 			set;
+		}
+
+		/// <summary>
+		/// How to calculate a group of an ip, by default using NBitcoin.IpExtensions.GetGroup.
+		/// Overrides AllowSameGroup.
+		/// </summary>
+		public Func<IPEndPoint, byte[]> CustomGroupSelector
+		{
+			get; set;
 		}
 
 		#region IDisposable Members

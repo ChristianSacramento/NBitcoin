@@ -1,25 +1,25 @@
-﻿using NBitcoin.Crypto;
+﻿using NBitcoin.BouncyCastle.Math;
+using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
-using NBitcoin.Protocol;
 using NBitcoin.RPC;
+#if !NOJSONNET
 using Newtonsoft.Json.Linq;
+#endif
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace NBitcoin
 {
-	/** Nodes collect new transactions into a block, hash them into a hash tree,
-	 * and scan through nonce values to make the block's hash satisfy proof-of-work
-	 * requirements.  When they solve the proof-of-work, they broadcast the block
-	 * to everyone and the block is added to the block chain.  The first transaction
-	 * in the block is a special one that creates a new coin owned by the creator
-	 * of the block.
-	 */
+	/// <summary>
+	/// Nodes collect new transactions into a block, hash them into a hash tree,
+	/// and scan through nonce values to make the block's hash satisfy proof-of-work
+	/// requirements.  When they solve the proof-of-work, they broadcast the block
+	/// to everyone and the block is added to the block chain.  The first transaction
+	/// in the block is a special one that creates a new coin owned by the creator
+	/// of the block.
+	/// </summary>
 	public class BlockHeader : IBitcoinSerializable
 	{
 		internal const int Size = 80;
@@ -136,7 +136,7 @@ namespace NBitcoin
 				return (nBits == 0);
 			}
 		}
-		#region IBitcoinSerializable Members
+#region IBitcoinSerializable Members
 
 		public void ReadWrite(BitcoinStream stream)
 		{
@@ -148,18 +148,29 @@ namespace NBitcoin
 			stream.ReadWrite(ref nNonce);
 		}
 
-		#endregion
+#endregion
 
 		public uint256 GetHash()
 		{
-			if(_Hashes != null && _Hashes[0] != null)
+			uint256 h = null;
+			var hashes = _Hashes;
+			if(hashes != null)
 			{
-				return _Hashes[0];
+				h = hashes[0];
 			}
-			var h = Hashes.Hash256(this.ToBytes());
-			if(_Hashes != null)
+			if(h != null)
+				return h;
+
+			using(HashStream hs = new HashStream())
 			{
-				_Hashes[0] = h;
+				this.ReadWrite(new BitcoinStream(hs, true));
+				h = hs.GetHash();
+			}
+
+			hashes = _Hashes;
+			if(hashes != null)
+			{
+				hashes[0] = h;
 			}
 			return h;
 		}
@@ -172,7 +183,7 @@ namespace NBitcoin
 			_Hashes = new uint256[1];
 		}
 
-		
+
 		uint256[] _Hashes;
 
 		public DateTimeOffset BlockTime
@@ -187,14 +198,19 @@ namespace NBitcoin
 			}
 		}
 
-		static System.Numerics.BigInteger Pow256 = System.Numerics.BigInteger.Pow(2, 256);
+		static BigInteger Pow256 = BigInteger.ValueOf(2).Pow(256);
 		public bool CheckProofOfWork()
 		{
+			return CheckProofOfWork(null);
+		}
+		public bool CheckProofOfWork(Consensus consensus)
+		{
+			consensus = consensus ?? Consensus.Main;
 			var bits = Bits.ToBigInteger();
-			if(bits <= System.Numerics.BigInteger.Zero || bits >= Pow256)
+			if(bits.CompareTo(BigInteger.Zero) <= 0 || bits.CompareTo(Pow256) >= 0)
 				return false;
 			// Check proof of work matches claimed amount
-			return GetHash() <= Bits.ToUInt256();
+			return consensus.GetPoWHash(this) <= Bits.ToUInt256();
 		}
 
 		public override string ToString()
@@ -336,55 +352,10 @@ namespace NBitcoin
 				return header;
 			}
 		}
-
-
-		//public MerkleBranch GetMerkleBranch(int txIndex)
-		//{
-		//	if(vMerkleTree.Count == 0)
-		//		ComputeMerkleRoot();
-		//	List<uint256> vMerkleBranch = new List<uint256>();
-		//	int j = 0;
-		//	for(int nSize = vtx.Count ; nSize > 1 ; nSize = (nSize + 1) / 2)
-		//	{
-		//		int i = Math.Min(txIndex, nSize - 1);
-		//		vMerkleBranch.Add(vMerkleTree[j + i]);
-		//		txIndex >>= 1;
-		//		j += nSize;
-		//	}
-		//	return new MerkleBranch(vMerkleBranch);
-		//}
-
-		//public static uint256 CheckMerkleBranch(uint256 hash, List<uint256> vMerkleBranch, int nIndex)
-		//{
-		//	if(nIndex == -1)
-		//		return 0;
-		//	foreach(var otherside in vMerkleBranch)
-		//	{
-		//		if((nIndex & 1) != 0)
-		//			hash = Hash(otherside, hash);
-		//		else
-		//			hash = Hash(hash, otherside);
-		//		nIndex >>= 1;
-		//	}
-		//	return hash;
-		//}
-
-		//std::vector<uint256> GetMerkleBranch(int nIndex) const;
-		//static uint256 CheckMerkleBranch(uint256 hash, const std::vector<uint256>& vMerkleBranch, int nIndex);
-		//void print() const;
-
 		public uint256 GetHash()
 		{
 			//Block's hash is his header's hash
-			return Hashes.Hash256(header.ToBytes());
-		}
-
-		public int Length
-		{
-			get
-			{
-				return header.ToBytes().Length;
-			}
+			return header.GetHash();
 		}
 
 		public void ReadWrite(byte[] array, int startIndex)
@@ -401,6 +372,31 @@ namespace NBitcoin
 			return tx;
 		}
 
+		/// <summary>
+		/// Create a block with the specified option only. (useful for stripping data from a block)
+		/// </summary>
+		/// <param name="options">Options to keep</param>
+		/// <returns>A new block with only the options wanted</returns>
+		public Block WithOptions(TransactionOptions options)
+		{
+			if(Transactions.Count == 0)
+				return this;
+			if(options == TransactionOptions.Witness && Transactions[0].HasWitness)
+				return this;
+			if(options == TransactionOptions.None && !Transactions[0].HasWitness)
+				return this;
+			var instance = new Block();
+			var ms = new MemoryStream();
+			var bms = new BitcoinStream(ms, true);
+			bms.TransactionOptions = options;
+			this.ReadWrite(bms);
+			ms.Position = 0;
+			bms = new BitcoinStream(ms, false);
+			bms.TransactionOptions = options;
+			instance.ReadWrite(bms);
+			return instance;
+		}
+
 		public void UpdateMerkleRoot()
 		{
 			this.Header.HashMerkleRoot = GetMerkleRoot().Hash;
@@ -412,12 +408,27 @@ namespace NBitcoin
 		/// <returns></returns>
 		public bool Check()
 		{
-			return CheckMerkleRoot() && Header.CheckProofOfWork();
+			return Check(null);
+		}
+
+		/// <summary>
+		/// Check proof of work and merkle root
+		/// </summary>
+		/// <param name="consensus"></param>
+		/// <returns></returns>
+		public bool Check(Consensus consensus)
+		{
+			return CheckMerkleRoot() && Header.CheckProofOfWork(consensus);
 		}
 
 		public bool CheckProofOfWork()
 		{
-			return Header.CheckProofOfWork();
+			return CheckProofOfWork(null);
+		}
+
+		public bool CheckProofOfWork(Consensus consensus)
+		{
+			return Header.CheckProofOfWork(consensus);
 		}
 
 		public bool CheckMerkleRoot()
@@ -471,7 +482,7 @@ namespace NBitcoin
 			});
 			return block;
 		}
-
+#if !NOJSONNET
 		public static Block ParseJson(string json)
 		{
 			var formatter = new BlockExplorerFormatter();
@@ -490,7 +501,7 @@ namespace NBitcoin
 			}
 			return blk;
 		}
-
+#endif
 		public static Block Parse(string hex)
 		{
 			return new Block(Encoders.Hex.DecodeData(hex));

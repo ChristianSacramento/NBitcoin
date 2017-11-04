@@ -1,9 +1,11 @@
-﻿using NBitcoin.Protocol;
+﻿using NBitcoin.BouncyCastle.Math;
+using NBitcoin.Protocol;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Numerics;
 using System.Text;
 using System.Threading.Tasks;
@@ -138,6 +140,25 @@ namespace NBitcoin.Tests
 
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
+		public void CanIterateConcurrentChain()
+		{
+			ConcurrentChain chain = new ConcurrentChain(Network.Main);
+			AppendBlock(chain);
+			AppendBlock(chain);
+			AppendBlock(chain);
+			foreach(var b in chain.EnumerateAfter(chain.Genesis))
+			{
+				chain.GetBlock(0);
+			}
+
+			foreach(var b in chain.ToEnumerable(false))
+			{
+				chain.GetBlock(0);
+			}
+		}
+
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
 		public void CanBuildChain()
 		{
 			ConcurrentChain chain = new ConcurrentChain(Network.Main);
@@ -150,7 +171,44 @@ namespace NBitcoin.Tests
 			Assert.Equal(b.HashBlock, chain.Tip.HashBlock);
 		}
 
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanFindFork()
+		{
+			ConcurrentChain chain = new ConcurrentChain(Network.Main);
+			ConcurrentChain chain2 = new ConcurrentChain(Network.Main);
+			AppendBlock(chain);
+			var fork = AppendBlock(chain);
+			var tip = AppendBlock(chain);
 
+			AssertFork(chain, chain2, chain.Genesis);
+			chain2 = new ConcurrentChain(Network.TestNet);
+			AssertFork(chain, chain2, null);
+			chain2 = new ConcurrentChain(Network.Main);
+			chain2.SetTip(fork);
+			AssertFork(chain, chain2, fork);
+			chain2.SetTip(tip);
+			AssertFork(chain, chain2, tip);
+		}
+
+		private void AssertFork(ConcurrentChain chain, ConcurrentChain chain2, ChainedBlock expectedFork)
+		{
+			var fork = chain.FindFork(chain2);
+			Assert.Equal(expectedFork, fork);
+			fork = chain.Tip.FindFork(chain2.Tip);
+			Assert.Equal(expectedFork, fork);
+
+			var temp = chain;
+			chain = chain2;
+			chain2 = temp;
+
+			fork = chain.FindFork(chain2);
+			Assert.Equal(expectedFork, fork);
+			fork = chain.Tip.FindFork(chain2.Tip);
+			Assert.Equal(expectedFork, fork);
+		}
+
+#if !NOFILEIO
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
 		public void CanCalculateDifficulty()
@@ -161,7 +219,7 @@ namespace NBitcoin.Tests
 			foreach(var history in histories)
 			{
 				var height = int.Parse(history.Split(',')[0]);
-				var expectedTarget = new Target(BigInteger.Parse(history.Split(',')[1]));
+				var expectedTarget = new Target(new BouncyCastle.Math.BigInteger(history.Split(',')[1], 10));
 
 				var block = main.GetBlock(height).Header;
 
@@ -171,15 +229,29 @@ namespace NBitcoin.Tests
 			}
 		}
 
+		[Fact]
+		[Trait("UnitTest", "UnitTest")]
+		public void CanValidateChain()
+		{
+			var main = new ConcurrentChain(LoadMainChain());
+			foreach(var h in main.ToEnumerable(false))
+			{
+				Assert.True(h.Validate(Network.Main));
+			}
+		}
+		
 		private byte[] LoadMainChain()
 		{
 			if(!File.Exists("MainChain1.dat"))
 			{
-				WebClient client = new WebClient();
-				client.DownloadFile("https://aois.blob.core.windows.net/public/MainChain1.dat", "MainChain1.dat");
+				HttpClient client = new HttpClient();
+				var bytes = client.GetByteArrayAsync("https://aois.blob.core.windows.net/public/MainChain1.dat").GetAwaiter().GetResult();
+				File.WriteAllBytes("MainChain1.dat", bytes);
 			}
 			return File.ReadAllBytes("MainChain1.dat");
 		}
+#endif
+
 		[Fact]
 		[Trait("UnitTest", "UnitTest")]
 		public void CanEnumerateAfterChainedBlock()

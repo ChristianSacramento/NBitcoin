@@ -5,12 +5,12 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Numerics;
 using System.Text;
 using System.Threading;
 using NBitcoin.Protocol;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
+using NBitcoin.BouncyCastle.Math;
 #if !NOSOCKET
 using System.Net.Sockets;
 #endif
@@ -39,27 +39,44 @@ namespace NBitcoin
 
 
 
-		public static T ToNetwork<T>(this T base58, Network network) where T : Base58Data
+		public static T ToNetwork<T>(this T obj, Network network) where T : IBitcoinString
 		{
 			if(network == null)
 				throw new ArgumentNullException("network");
-			if(base58.Network == network)
-				return base58;
-			if(base58 == null)
-				throw new ArgumentNullException("base58");
-			var inner = base58.ToBytes();
-			if(base58.Type != Base58Type.COLORED_ADDRESS)
+			if(obj == null)
+				throw new ArgumentNullException("obj");
+			if(obj.Network == network)
+				return obj;
+			if(obj is IBase58Data)
 			{
-				byte[] version = network.GetVersionBytes(base58.Type);
-				var newBase58 = Encoders.Base58Check.EncodeData(version.Concat(inner).ToArray());
-				return Network.CreateFromBase58Data<T>(newBase58, network);
+				var b58 = (IBase58Data)obj;
+				if(b58.Type != Base58Type.COLORED_ADDRESS)
+				{
+
+					byte[] version = network.GetVersionBytes(b58.Type, true);
+					var inner = Encoders.Base58Check.DecodeData(b58.ToString()).Skip(version.Length).ToArray();
+					var newBase58 = Encoders.Base58Check.EncodeData(version.Concat(inner).ToArray());
+					return Network.Parse<T>(newBase58, network);
+				}
+				else
+				{
+					var colored = BitcoinColoredAddress.GetWrappedBase58(obj.ToString(), obj.Network);
+					var address = Network.Parse<BitcoinAddress>(colored, obj.Network).ToNetwork(network);
+					return (T)(object)address.ToColoredAddress();
+				}
+			}
+			else if(obj is IBech32Data)
+			{
+				var b32 = (IBech32Data)obj;
+				var encoder = b32.Network.GetBech32Encoder(b32.Type, true);
+				byte wit;
+				var data = encoder.Decode(b32.ToString(), out wit);
+				encoder = network.GetBech32Encoder(b32.Type, true);
+				var str = encoder.Encode(wit, data);
+				return (T)(object)Network.Parse<T>(str, network);
 			}
 			else
-			{
-				var colored = BitcoinColoredAddress.GetWrappedBase58(base58.ToWif(), base58.Network);
-				var address = Network.CreateFromBase58Data<BitcoinAddress>(colored).ToNetwork(network);
-				return (T)(object)address.ToColoredAddress();
-			}
+				throw new NotSupportedException();
 		}
 
 		public static byte[] ReadBytes(this Stream stream, int bytesToRead)
@@ -70,6 +87,18 @@ namespace NBitcoin
 			do
 			{
 				num += (num2 = stream.Read(buffer, num, bytesToRead - num));
+			} while(num2 > 0 && num < bytesToRead);
+			return buffer;
+		}
+
+		public static async Task<byte[]> ReadBytesAsync(this Stream stream, int bytesToRead)
+		{
+			var buffer = new byte[bytesToRead];
+			int num = 0;
+			int num2;
+			do
+			{
+				num += (num2 = await stream.ReadAsync(buffer, num, bytesToRead - num).ConfigureAwait(false));
 			} while(num2 > 0 && num < bytesToRead);
 			return buffer;
 		}
@@ -125,11 +154,16 @@ namespace NBitcoin
 #if !(PORTABLE || NETCORE)
 		public static int ReadEx(this Stream stream, byte[] buffer, int offset, int count, CancellationToken cancellation = default(CancellationToken))
 		{
-			if(stream == null) throw new ArgumentNullException("stream");
-			if(buffer == null) throw new ArgumentNullException("buffer");
-			if(offset < 0 || offset > buffer.Length) throw new ArgumentOutOfRangeException("offset");
-			if(count <= 0 || count > buffer.Length) throw new ArgumentOutOfRangeException("count"); //Disallow 0 as a debugging aid.
-			if(offset > buffer.Length - count) throw new ArgumentOutOfRangeException("count");
+			if(stream == null)
+				throw new ArgumentNullException("stream");
+			if(buffer == null)
+				throw new ArgumentNullException("buffer");
+			if(offset < 0 || offset > buffer.Length)
+				throw new ArgumentOutOfRangeException("offset");
+			if(count <= 0 || count > buffer.Length)
+				throw new ArgumentOutOfRangeException("count"); //Disallow 0 as a debugging aid.
+			if(offset > buffer.Length - count)
+				throw new ArgumentOutOfRangeException("count");
 
 			int totalReadCount = 0;
 
@@ -152,7 +186,7 @@ namespace NBitcoin
 					//EndRead might block, so we need to test cancellation before calling it.
 					//This also is a bug because calling EndRead after BeginRead is contractually required.
 					//A potential fix is to use the ReadAsync API. Another fix is to register a callback with BeginRead that calls EndRead in all cases.
-					cancellation.ThrowIfCancellationRequested(); 
+					cancellation.ThrowIfCancellationRequested();
 
 					currentReadCount = stream.EndRead(ar);
 				}
@@ -209,14 +243,9 @@ namespace NBitcoin
 		public static void AddOrReplace<TKey, TValue>(this IDictionary<TKey, TValue> dico, TKey key, TValue value)
 		{
 			if(dico.ContainsKey(key))
-			{
-				dico.Remove(key);
-				dico.Add(key, value);
-			}
+				dico[key] = value;
 			else
-			{
 				dico.Add(key, value);
-			}
 		}
 
 		public static TValue TryGet<TKey, TValue>(this IDictionary<TKey, TValue> dictionary, TKey key)
@@ -259,6 +288,17 @@ namespace NBitcoin
 
 	internal static class ByteArrayExtensions
 	{
+		internal static bool StartWith(this byte[] data, byte[] versionBytes)
+		{
+			if(data.Length < versionBytes.Length)
+				return false;
+			for(int i = 0; i < versionBytes.Length; i++)
+			{
+				if(data[i] != versionBytes[i])
+					return false;
+			}
+			return true;
+		}
 		internal static byte[] SafeSubarray(this byte[] array, int offset, int count)
 		{
 			if(array == null)
@@ -286,10 +326,26 @@ namespace NBitcoin
 			Buffer.BlockCopy(array, offset, data, 0, count);
 			return data;
 		}
+
+		internal static byte[] Concat(this byte[] arr, params byte[][] arrs)
+		{
+			var len = arr.Length + arrs.Sum(a => a.Length);
+			var ret = new byte[len];
+			Buffer.BlockCopy(arr, 0, ret, 0, arr.Length);
+			var pos = arr.Length;
+			foreach(var a in arrs)
+			{
+				Buffer.BlockCopy(a, 0, ret, pos, a.Length);
+				pos += a.Length;
+			}
+			return ret;
+		}
+
 	}
 
 	public class Utils
 	{
+
 		internal static void SafeSet(ManualResetEvent ar)
 		{
 			try
@@ -406,36 +462,26 @@ namespace NBitcoin
 
 		}
 
-
-
-#if !NOBIGINT
-		//https://en.bitcoin.it/wiki/Script
 		public static byte[] BigIntegerToBytes(BigInteger num)
-#else
-		internal static byte[] BigIntegerToBytes(BigInteger num)
-#endif
 		{
-			if(num == 0)
+			if(num.Equals(BigInteger.Zero))
 				//Positive 0 is represented by a null-length vector
 				return new byte[0];
 
 			bool isPositive = true;
-			if(num < 0)
+			if(num.CompareTo(BigInteger.Zero) < 0)
 			{
 				isPositive = false;
-				num *= -1;
+				num = num.Multiply(BigInteger.ValueOf(-1));
 			}
 			var array = num.ToByteArray();
+			Array.Reverse(array);
 			if(!isPositive)
 				array[array.Length - 1] |= 0x80;
 			return array;
 		}
 
-#if !NOBIGINT
 		public static BigInteger BytesToBigInteger(byte[] data)
-#else
-		internal static BigInteger BytesToBigInteger(byte[] data)
-#endif
 		{
 			if(data == null)
 				throw new ArgumentNullException("data");
@@ -446,9 +492,10 @@ namespace NBitcoin
 			if(!positive)
 			{
 				data[data.Length - 1] &= unchecked((byte)~0x80);
-				return -new BigInteger(data);
+				Array.Reverse(data);
+				return new BigInteger(1, data).Negate();
 			}
-			return new BigInteger(data);
+			return new BigInteger(1, data);
 		}
 
 		static readonly TraceSource _TraceSource = new TraceSource("NBitcoin");

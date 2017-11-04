@@ -69,8 +69,10 @@ namespace NBitcoin
 							_Tip = null;
 							SetTipNoLock(new ChainedBlock(header, 0));
 						}
-						else
+						else if(_Tip.HashBlock == header.HashPrevBlock)
 							SetTipNoLock(new ChainedBlock(header, id.Value, Tip));
+						else
+							break;
 						height++;
 					}
 				}
@@ -147,7 +149,7 @@ namespace NBitcoin
 			}
 			var fork = GetBlockNoLock(height);
 			foreach(var newBlock in block.EnumerateToGenesis()
-				.TakeWhile(c => c != Tip))
+				.TakeWhile(c => c != fork))
 			{
 				_BlocksById.AddOrReplace(newBlock.HashBlock, newBlock);
 				_BlocksByHeight.AddOrReplace(newBlock.Height, newBlock);
@@ -236,17 +238,18 @@ namespace NBitcoin
 
 		protected override IEnumerable<ChainedBlock> EnumerateFromStart()
 		{
-			using(@lock.LockRead())
+			int i = 0;
+			ChainedBlock block = null;
+			while(true)
 			{
-				int i = 0;
-				while(true)
+				using(@lock.LockRead())
 				{
-					var block = GetBlockNoLock(i);
+					block = GetBlockNoLock(i);
 					if(block == null)
 						yield break;
-					yield return block;
-					i++;
 				}
+				yield return block;
+				i++;
 			}
 		}
 

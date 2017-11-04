@@ -1,4 +1,5 @@
-﻿using NBitcoin.RPC;
+﻿#if !NOJSONNET
+using NBitcoin.RPC;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -16,11 +17,16 @@ namespace NBitcoin
 				throw new ArgumentNullException("client");
 			_Client = client;
 		}
-		#region ITransactionRepository Members
+#region ITransactionRepository Members
 
 		public Task<Transaction> GetAsync(uint256 txId)
 		{
 			return _Client.GetRawTransactionAsync(txId, false);
+		}
+
+		public Task BroadcastAsync(Transaction tx)
+		{
+			return _Client.SendRawTransactionAsync(tx);
 		}
 
 		public Task PutAsync(uint256 txId, Transaction tx)
@@ -28,6 +34,7 @@ namespace NBitcoin
 			return Task.FromResult(false);
 		}
 
-		#endregion
+#endregion
 	}
 }
+#endif
